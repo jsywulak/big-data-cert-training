@@ -12,33 +12,76 @@ Resources:
     Properties:
       ImageId: ami-a4c7edb2
       KeyName: jonny-labs
-      InstanceType: m4.large
+      InstanceType: c3.2xlarge
+      BlockDeviceMappings:
+      - 
+        DeviceName: "/dev/sdm"
+        Ebs: 
+          VolumeType: "io1"
+          Iops: "200"
+          DeleteOnTermination: "true"
+          VolumeSize: "200"        
+      -
+        DeviceName: /dev/sdc
+        VirtualName: ephemeral0      
       IamInstanceProfile:
         !Ref RootInstanceProfile
       SecurityGroups:
         - Ref: workstationSecurityGroup
       UserData:
         Fn::Base64: !Sub |
-          yum group install Development Tools
-          mkdir ~/emrdata
-          export DSS_PATH=$HOME/emrdata
-          echo 'export DSS_PATH=$HOME/emrdata' > ~/.bash_profile'
-          aws s3 cp s3://${BucketName}/${ObjectKey} .
-          cp 2.17.2/dbgen/makefile.suite 2.17.2/dbgen/makefile
-          sed -e 's/CC      =/CC      = gcc/;s/DATABASE=/DATABASE= POSTGRES/; s/MACHINE =/MACHINE = LINUX/; s/WORKLOAD =/WORKLOAD = TPCH/' 2.17.2/dbgen/makefile.suite > 2.17.2/dbgen/makefile
-          pushd 2.17.2/dbgen
-          make
-          ./dbgen -v -T o -s 10
+          #!/bin/bash
+          set -e
+          set -x
+          echo started at $(date)
+          yum groupinstall -y 'Development Tools'
+          pushd /media/ephemeral0/
+            rm -rf 2.17.2 emrdata redshiftdata
+            mkdir emrdata redshiftdata
+            aws s3 cp s3://stelligentlabs/jsywulak/tcp-h-tool.zip .
+            unzip -q tcp-h-tool.zip
+            rm -f tcp-h-tool.zip
+            sed -e 's/CC      =/CC      = gcc/;s/DATABASE=/DATABASE= POSTGRES/; s/MACHINE =/MACHINE = LINUX/; s/WORKLOAD =/WORKLOAD = TPCH/' 2.17.2/dbgen/makefile.suite > 2.17.2/dbgen/makefile
+            # generate 10g EMR data set
+            pushd 2.17.2/dbgen
+              set +e
+              make
+              set -e
+              export DSS_PATH=/media/ephemeral0//emrdata
+              date
+              time ./dbgen -q -T o -s 10 > /dev/null
+              date
+            popd
+            time aws s3 cp emrdata/ s3://jonny_big_data_labs/emrdata --recursive --quiet
+            rm -rf emrdata
+            
+            # generate 60g Redshift data set
+            pushd 2.17.2/dbgen              
+              export DSS_PATH=/media/ephemeral0//redshiftdata
+              date
+              time ./dbgen -q -T o -s 40 > /dev/null
+              date
+            popd
+            # split Redshift data set files 
+            pushd $DSS_PATH
+              time split -d -l 15000000 -a 4 orders.tbl orders.tbl.
+              rm -f orders.tbl
+              time split -d -l 60000000 -a 4 lineitem.tbl lineitem.tbl.
+              rm -f lineitem.tbl
+              wget https://raw.githubusercontent.com/sko71/aws-bigdata-specialty/master/Domain%204/orders.manifest
+              wget https://raw.githubusercontent.com/sko71/aws-bigdata-specialty/master/Domain%204/lineitem.manifest
+              sed -ie 's/your bucket name/jonny_big_data_labs/' orders.manifest lineitem.manifest 
+            popd
+            time aws s3 cp redshiftdata/ s3://jonny_big_data_labs/redshiftdata --recursive --quiet
+            echo completed at $(date)
           popd
-
-
   bigDataWindowsWorkstation:
     Type: AWS::EC2::Instance
     Version: '2009-05-15'
     Properties:
       ImageId: ami-bd5b7dab
       KeyName: jonny-labs
-      InstanceType: t2.micro
+      InstanceType: m4.large
       IamInstanceProfile:
         !Ref RootInstanceProfile
       SecurityGroups:
@@ -53,8 +96,12 @@ Resources:
         ToPort: '22'
         CidrIp: 0.0.0.0/0
       - IpProtocol: tcp
-        FromPort: '5589'
-        ToPort: '5589'
+        FromPort: '3389'
+        ToPort: '3389'
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: udp
+        FromPort: '3389'
+        ToPort: '3389'
         CidrIp: 0.0.0.0/0
   RootRole:
     Type: AWS::IAM::Role
@@ -87,6 +134,3 @@ Resources:
       Path: "/"
       Roles:
       - !Ref RootRole
-
-
-
